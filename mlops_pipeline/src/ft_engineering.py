@@ -8,6 +8,9 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from datetime import datetime
+from feature_engine.imputation import MeanMedianImputer, CategoricalImputer
+from feature_engine.encoding import OneHotEncoder as FEOneHotEncoder, OrdinalEncoder as FEOrdinalEncoder
+
 
 
 # funcion ára exportar ft_engineering()
@@ -92,58 +95,69 @@ def ft_engineering_procesado():
     df["ratio_mora_saldo"] = df["saldo_mora"] / (df["saldo_total"] + 1)
     
     # 2) Identificar variables categoricas, numericas y binarias
-    categorical_cols = ['tipo_credito', 'grupoEdad', 'tendencia_ingresos']
+    categorical_cols = ['tipo_credito', 'tendencia_ingresos']
+    
+    ordinal_cols = ['grupoEdad']
+    
     numerical_cols = ['salario_cliente', 'capital_prestado', 'edad_cliente', 'total_otros_prestamos', 'cuota_pactada', 'puntaje', 'puntaje_datacredito', 'cant_creditosvigentes', 'huella_consulta', 'saldo_mora', 'saldo_total', 'saldo_principal', 'saldo_mora_codeudor', 'creditos_sectorFinanciero', 'creditos_sectorCooperativo', 'creditos_sectorReal', 
                     'promedio_ingresos_datacredito', 'anio_prestamo', 'mes_prestamo', 'dia_semana_prestamo', 'total_creditos']
     binary_cols = ['es_independiente', 'fin_de_mes']
-
-    # 3) creamos pipeline para cada ruta
-
-    cat_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
-    ])
-
-    num_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler())
-    ])
-
-    bin_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent"))
-    ])
     
-    # 4) Realizamos las transformaciones con ColumnTransformer
-    preprocess = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, numerical_cols),
-            ("cat", cat_pipe, categorical_cols),
-            ("bin", bin_pipe, binary_cols)
-        ]
-    )
+    # 3) Realizamos las transformaciones con Feature-engine
+    
+    # Tranformacion del tipo de los tipos de dato
+    for col in categorical_cols:
+        df[col] = df[col].astype("category")
+        
+    for col in binary_cols:
+        df[col] = df[col].astype("category")
+    
+    print(df[ordinal_cols].dtypes)
 
-    # 5) Definimos features y target
+    
+    
+    preprocessor_fe = Pipeline(steps=[
+        ('num_impute', MeanMedianImputer(
+            variables=numerical_cols, 
+            imputation_method='median')),
+        
+        ('cat_encode', FEOneHotEncoder(
+            variables=categorical_cols)),
+        
+        ('ord_encode', FEOrdinalEncoder(
+            variables=ordinal_cols, 
+            encoding_method='ordered')),
+        
+        ('bin_encode', CategoricalImputer(
+            variables=binary_cols,
+            imputation_method='frequent'))
+    ])  
+
+
+    # 4) Definimos features y target
     X = df.drop('Pago_atiempo', axis=1)
     y = df['Pago_atiempo']
 
-    # 6) Dividimos train-test (mismo que partes anteriores)
+    # 5) Dividimos train-test (mismo que partes anteriores)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    # 7) aplicamos el preprocesamiento
-    X_train_processed = preprocess.fit_transform(X_train)
-    X_test_processed = preprocess.transform(X_test)
+
+    # 6) aplicamos el preprocesamiento
+    X_train_processed_fe = preprocessor_fe.fit_transform(X_train, y_train)
+    X_test_processed_fe = preprocessor_fe.transform(X_test)
+
     
-    # 8) Convertimos a DataFrame
-    feature_names = preprocess.get_feature_names_out()
+    # 7) Convertimos a DataFrame
+    feature_names = preprocessor_fe.get_feature_names_out()
 
     X_train_df = pd.DataFrame(
-        X_train_processed,
+        X_train_processed_fe,
         columns=feature_names,
         index=X_train.index
     )
 
     X_test_df = pd.DataFrame(
-        X_test_processed,
+        X_test_processed_fe,
         columns=feature_names,
         index=X_test.index
     )
