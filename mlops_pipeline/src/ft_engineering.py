@@ -1,13 +1,9 @@
 # librerías
 import pandas as pd
 from cargar_datos import cargar_datos
-from sklearn.preprocessing import FunctionTransformer
-from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from datetime import datetime
 from feature_engine.imputation import MeanMedianImputer, CategoricalImputer
 from feature_engine.encoding import OneHotEncoder as FEOneHotEncoder, OrdinalEncoder as FEOrdinalEncoder
 
@@ -59,6 +55,7 @@ def ft_engineering_procesado():
     df = df[df["plazo_meses"] <= 60]
 
     #Eliminamos outliers de clientes con salarios > al percentil 99 
+    #MODIFICARLE LUEGO CON 0.95
     p99 = df["salario_cliente"].quantile(0.99)
     df = df[df["salario_cliente"] <= p99]
 
@@ -83,6 +80,9 @@ def ft_engineering_procesado():
 
     # si es fin de mes, clásico en riesgo
     df["fin_de_mes"] = df["fecha_prestamo"].dt.is_month_end.astype(int)
+    
+    # eliminar fecha_prestamo antes de entrenar
+    df = df.drop(columns=["fecha_prestamo"])
 
     # Total de créditos activos
     df["total_creditos"] = (
@@ -104,62 +104,62 @@ def ft_engineering_procesado():
     binary_cols = ['es_independiente', 'fin_de_mes']
     
     # 3) Realizamos las transformaciones con Feature-engine
-    
-    # Tranformacion del tipo de los tipos de dato
-    for col in categorical_cols:
+    for col in categorical_cols + ordinal_cols:
         df[col] = df[col].astype("category")
-        
+
+    # binarios: que sean 0/1 numéricos
     for col in binary_cols:
-        df[col] = df[col].astype("category")
-    
-    print(df[ordinal_cols].dtypes)
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    
-    
+    # numéricas: forzar a numeric
+    for col in numerical_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    leak_cols = [
+        "saldo_mora", "saldo_total", "saldo_principal",
+        "saldo_mora_codeudor", "ratio_mora_saldo", "puntaje"
+    ]
+
+    X = df.drop(columns=["Pago_atiempo"] + leak_cols)
+    y = df["Pago_atiempo"]
+
+    # Columnas para el preprocessor: solo las que siguen en X (sin leak_cols)
+    numerical_cols_X = [c for c in numerical_cols if c in X.columns]
+    categorical_cols_X = [c for c in categorical_cols if c in X.columns]
+    ordinal_cols_X = [c for c in ordinal_cols if c in X.columns]
+    binary_cols_X = [c for c in binary_cols if c in X.columns]
+
     preprocessor_fe = Pipeline(steps=[
-        ('num_impute', MeanMedianImputer(
-            variables=numerical_cols, 
-            imputation_method='median')),
-        
-        ('cat_encode', FEOneHotEncoder(
-            variables=categorical_cols)),
-        
-        ('ord_encode', FEOrdinalEncoder(
-            variables=ordinal_cols, 
-            encoding_method='ordered')),
-        
-        ('bin_encode', CategoricalImputer(
-            variables=binary_cols,
-            imputation_method='frequent'))
-    ])  
-
-
-    # 4) Definimos features y target
-    X = df.drop('Pago_atiempo', axis=1)
-    y = df['Pago_atiempo']
+        ("num_impute", MeanMedianImputer(variables=numerical_cols_X, imputation_method="median")),
+        ("cat_impute", CategoricalImputer(variables=categorical_cols_X, imputation_method="frequent")),
+        ("ord_impute", CategoricalImputer(variables=ordinal_cols_X, imputation_method="frequent")),
+        ("ord_encode", FEOrdinalEncoder(variables=ordinal_cols_X, encoding_method="ordered")),
+        ("cat_encode", FEOneHotEncoder(variables=categorical_cols_X)),
+        ("bin_impute", MeanMedianImputer(variables=binary_cols_X, imputation_method="median")),
+    ])
 
     # 5) Dividimos train-test (mismo que partes anteriores)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-
+    
     # 6) aplicamos el preprocesamiento
     X_train_processed_fe = preprocessor_fe.fit_transform(X_train, y_train)
     X_test_processed_fe = preprocessor_fe.transform(X_test)
 
-    
     # 7) Convertimos a DataFrame
     feature_names = preprocessor_fe.get_feature_names_out()
 
-    X_train_df = pd.DataFrame(
+    X_train_processed_fe = pd.DataFrame(
         X_train_processed_fe,
         columns=feature_names,
         index=X_train.index
     )
 
-    X_test_df = pd.DataFrame(
+    X_test_processed_fe = pd.DataFrame(
         X_test_processed_fe,
         columns=feature_names,
         index=X_test.index
     )
-    
-    return X_train_df, X_test_df, y_train, y_test
+
+    #Visualizamos balanceo de clases (target)
+    print(df['Pago_atiempo'].value_counts())
+    return X_train_processed_fe, X_test_processed_fe, y_train, y_test
