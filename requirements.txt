@@ -7,6 +7,7 @@ db-dtypes
 jupyter
 notebook
 ipykernel
+joblib
 seaborn
 ipywidgets
 scikit-learn
@@ -16,4 +17,9 @@ lightgbm
 pydantic
 fastapi
 feature_engine
+streamlit
+requests
+plotly
+evidently
+scipy
 uvicorn[standard]
