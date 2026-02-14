@@ -3,7 +3,6 @@ import pandas as pd
 from cargar_datos import cargar_datos
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 from feature_engine.imputation import MeanMedianImputer, CategoricalImputer
 from feature_engine.encoding import OneHotEncoder as FEOneHotEncoder, OrdinalEncoder as FEOrdinalEncoder
 
@@ -81,9 +80,6 @@ def ft_engineering_procesado():
     # si es fin de mes, clásico en riesgo
     df["fin_de_mes"] = df["fecha_prestamo"].dt.is_month_end.astype(int)
     
-    # eliminar fecha_prestamo antes de entrenar
-    df = df.drop(columns=["fecha_prestamo"])
-
     # Total de créditos activos
     df["total_creditos"] = (
         df["creditos_sectorFinanciero"] +
@@ -120,7 +116,11 @@ def ft_engineering_procesado():
         "saldo_mora_codeudor", "ratio_mora_saldo", "puntaje"
     ]
 
-    X = df.drop(columns=["Pago_atiempo"] + leak_cols)
+    # Orden temporal antes del split
+    df = df.sort_values("fecha_prestamo").reset_index(drop=True)
+
+    drop_cols = ["Pago_atiempo", "fecha_prestamo"] + leak_cols
+    X = df.drop(columns=drop_cols)
     y = df["Pago_atiempo"]
 
     # Columnas para el preprocessor: solo las que siguen en X (sin leak_cols)
@@ -138,8 +138,10 @@ def ft_engineering_procesado():
         ("bin_impute", MeanMedianImputer(variables=binary_cols_X, imputation_method="median")),
     ])
 
-    # 5) Dividimos train-test (mismo que partes anteriores)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # 5) Dividimos train-test de forma temporal (sin shuffle)
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
     
     # 6) aplicamos el preprocesamiento
     X_train_processed_fe = preprocessor_fe.fit_transform(X_train, y_train)

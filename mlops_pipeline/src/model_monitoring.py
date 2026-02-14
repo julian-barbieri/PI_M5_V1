@@ -1,6 +1,7 @@
 import os
 import time
 import pandas as pd
+import numpy as np
 import requests
 import streamlit as st
 from ft_engineering import ft_engineering_procesado
@@ -11,8 +12,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from evidently import Report 
 from evidently.presets import DataDriftPreset
-from sklearn.model_selection import train_test_split
 from cargar_datos import cargar_datos
+from scipy.stats import ks_2samp
 
 
 ##############
@@ -31,9 +32,10 @@ MONITOR_LOG = "./Base_de_datos.csv" #dataset para monitorear
 def load_data():
     X_train, X_test, y_train, y_test = ft_engineering_procesado()
     # acá X_train/X_test ya son DataFrames numéricos
-    X_ref, X_new, y_ref, y_new = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
-    )
+    split_idx = int(len(X_train) * 0.8)
+    # Últimos registros como datos actuales (orden cronológico)
+    X_ref, X_new = X_train.iloc[:split_idx], X_train.iloc[split_idx:]
+    y_ref, y_new = y_train.iloc[:split_idx], y_train.iloc[split_idx:]
     return X_ref, X_new, y_ref, y_new
 
 X_ref, X_new, y_ref, y_new = load_data()
@@ -45,6 +47,148 @@ def make_arrow_compatible(df: pd.DataFrame) -> pd.DataFrame:
     for col in obj_cols:
         safe_df[col] = safe_df[col].astype("string")
     return safe_df
+
+##############
+# PSI (Population Stability Index)
+##############
+
+def calculate_psi(reference, current, bins=10):
+    """
+    Calcula el PSI entre dos distribuciones.
+    
+    PSI > 0.25: drift significativo
+    PSI 0.1-0.25: drift moderado
+    PSI < 0.1: sin drift
+    """
+    # Manejo de valores nulos
+    reference = reference.dropna()
+    current = current.dropna()
+    
+    if len(reference) == 0 or len(current) == 0:
+        return np.nan
+    
+    # Para variables numéricas
+    if pd.api.types.is_numeric_dtype(reference):
+        # Definir bins basados en el rango combinado
+        min_val = min(reference.min(), current.min())
+        max_val = max(reference.max(), current.max())
+        
+        # Evitar divisiones por cero
+        if min_val == max_val:
+            return 0.0
+        
+        bins_edges = np.linspace(min_val, max_val, bins + 1)
+        
+        # Histogramas
+        ref_counts = np.histogram(reference, bins=bins_edges)[0]
+        curr_counts = np.histogram(current, bins=bins_edges)[0]
+    else:
+        # Para variables categóricas
+        categories = list(set(reference.unique()) | set(current.unique()))
+        ref_counts = np.array([sum(reference == cat) for cat in categories])
+        curr_counts = np.array([sum(current == cat) for cat in categories])
+    
+    # Normalizar para obtener proporciones
+    ref_prop = ref_counts / ref_counts.sum()
+    curr_prop = curr_counts / curr_counts.sum()
+    
+    # Evitar log(0)
+    ref_prop = np.where(ref_prop == 0, 1e-10, ref_prop)
+    curr_prop = np.where(curr_prop == 0, 1e-10, curr_prop)
+    
+    # PSI = sum((curr_prop - ref_prop) * ln(curr_prop / ref_prop))
+    psi = np.sum((curr_prop - ref_prop) * np.log(curr_prop / ref_prop))
+    
+    return psi
+
+
+def calculate_temporal_drift(log_df, reference_df, window_size=50, exclude_cols=None):
+    """
+    Calcula el PSI máximo por ventana de tiempo.
+    Permite ver cómo evoluciona el drift.
+    """
+    if exclude_cols is None:
+        exclude_cols = []
+    
+    temporal_metrics = []
+    
+    # Agrupar por ventanas de tamaño window_size
+    num_windows = max(1, len(log_df) // window_size)
+    
+    for i in range(num_windows):
+        start_idx = i * window_size
+        end_idx = min((i + 1) * window_size, len(log_df))
+        window_data = log_df.iloc[start_idx:end_idx].drop(
+            columns=["prediction", "timestamp"], 
+            errors="ignore"
+        )
+        
+        if len(window_data) == 0:
+            continue
+        
+        # Calcular PSI máximo en la ventana
+        max_psi = 0
+        max_psi_var = None
+        for col in reference_df.columns:
+            if col not in exclude_cols and col in window_data.columns:
+                psi = calculate_psi(reference_df[col], window_data[col])
+                if not np.isnan(psi) and psi >= max_psi:
+                    max_psi = psi
+                    max_psi_var = col
+        
+        # Timestamp medio de la ventana
+        if "timestamp" in log_df.columns:
+            mid_timestamp = pd.to_datetime(log_df.iloc[start_idx:end_idx]["timestamp"]).mean()
+        else:
+            mid_timestamp = end_idx
+        
+        temporal_metrics.append({
+            "Ventana": i + 1,
+            "Timestamp": mid_timestamp,
+            "PSI_max": round(max_psi, 4),
+            "Variable_max": max_psi_var,
+            "Muestras": len(window_data)
+        })
+    
+    return pd.DataFrame(temporal_metrics)
+
+
+def calculate_drift_metrics(reference_df, current_df, exclude_cols=None):
+    """
+    Calcula PSI para todas las columnas numéricas.
+    Retorna un DataFrame con los resultados.
+    
+    exclude_cols: lista de columnas a excluir del análisis
+    """
+    if exclude_cols is None:
+        exclude_cols = []
+    
+    metrics = []
+    
+    for col in reference_df.columns:
+        if col in exclude_cols or col not in current_df.columns:
+            continue
+            
+        psi = calculate_psi(reference_df[col], current_df[col])
+        
+        # Clasificar drift
+        if np.isnan(psi):
+            drift_status = "N/A"
+        elif psi > 0.25:
+            drift_status = "🔴 Alto"
+        elif psi > 0.1:
+            drift_status = "🟡 Moderado"
+        else:
+            drift_status = "🟢 Bajo"
+        
+        metrics.append({
+            "Variable": col,
+            "PSI": round(psi, 4),
+            "Estado": drift_status
+        })
+    
+    return pd.DataFrame(metrics)
+
 
 ##############
 # 3) API para predicciones
@@ -76,9 +220,9 @@ def log_predictions(X_batch, preds):
     log_df['timestamp'] = pd.Timestamp.now()
     
     if os.path.exists(MONITOR_LOG):
-        log_df.to_csv(MONITOR_LOG, mode='a', header=False, index = False)
+        log_df.to_csv(MONITOR_LOG, mode='a', header=False, index=False, quoting=1)  # quoting=csv.QUOTE_ALL
     else:
-        log_df.to_csv(MONITOR_LOG, index=False)
+        log_df.to_csv(MONITOR_LOG, index=False, quoting=1)
 
 ##############
 # 5) Reporte Evidently
@@ -90,6 +234,43 @@ def generate_drift_report(ref_data, new_data):
     return report
 
 ##############
+# 6) Alertas y Recomendaciones
+##############
+
+def generate_recommendations(drift_metrics):
+    """
+    Genera recomendaciones automáticas basadas en el drift detectado.
+    """
+    recommendations = []
+    
+    # Análisis de drift
+    high_drift_vars = drift_metrics[drift_metrics["PSI"] > 0.25]["Variable"].tolist()
+    moderate_drift_vars = drift_metrics[(drift_metrics["PSI"] > 0.1) & (drift_metrics["PSI"] <= 0.25)]["Variable"].tolist()
+    
+    if len(high_drift_vars) > 0:
+        recommendations.append({
+            "nivel": "🔴 CRÍTICO",
+            "mensaje": f"Se detectó DRIFT ALTO en {len(high_drift_vars)} variable(s): {', '.join(high_drift_vars[:3])}",
+            "accion": "RETRAINING URGENTE - Reentrenar el modelo inmediatamente"
+        })
+    
+    if len(moderate_drift_vars) > 0 and len(high_drift_vars) == 0:
+        recommendations.append({
+            "nivel": "🟡 MODERADO",
+            "mensaje": f"Se detectó DRIFT MODERADO en {len(moderate_drift_vars)} variable(s): {', '.join(moderate_drift_vars[:3])}",
+            "accion": "MONITOREO INTENSIVO - Aumentar frecuencia de monitoreo. Considerar retraining en próximas horas"
+        })
+    
+    if len(high_drift_vars) == 0 and len(moderate_drift_vars) == 0:
+        recommendations.append({
+            "nivel": "🟢 ESTABLE",
+            "mensaje": "Todas las variables se encuentran ESTABLES",
+            "accion": "Continuar con monitoreo rutinario normal"
+        })
+    
+    return recommendations
+
+##############
 # 5) StreamLit UI con graficas
 ##############
 
@@ -97,9 +278,14 @@ st.title("Monitoreo del modelo en Producción")
 
 # Metricas principales en la aparte superior
 if os.path.exists(MONITOR_LOG):
-    logged_data = pd.read_csv(MONITOR_LOG)
+    try:
+        logged_data = pd.read_csv(MONITOR_LOG, on_bad_lines='skip', engine='python')
+    except Exception as e:
+        st.error(f"Error al leer logs: {e}")
+        st.warning("Intenta borrar el archivo Base_de_datos.csv y reinicia.")
+        logged_data = pd.DataFrame()
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric("Total Predicciones", len(logged_data))
@@ -107,9 +293,6 @@ if os.path.exists(MONITOR_LOG):
         st.metric("Predicción promedio", f"{logged_data['prediction'].mean():.3f}")
     with col3:
         st.metric("Desviacion Estándar", f"{logged_data['prediction'].std():.3f}")
-    with col4:
-        positive_rate = (logged_data['prediction'] > 0.5).mean()*100
-        st.metric("Tasa Positiva (%)", f"{positive_rate:.1f}%")
 
 st.sidebar.header("Opciones")
 sample_size = st.sidebar.slider("Tamaño de muestra para monitoreo:", 50, 500, 200)
@@ -124,38 +307,59 @@ if st.button("Generar nuevas predicciones y actualizar log"):
         log_predictions(sample, preds)
         st.success("Nuevas predicciones agregadas al log")
         st.rerun()
-        
-    # Mostrar datos y graficas
-    if os.path.exists(MONITOR_LOG):
-        
-        logged_data = pd.read_csv(MONITOR_LOG)
-        
-        #Crear tabs para organizar mejor
-        tab1, tab2, tab3 = st.tabs(["Graficas", "Data Drift", "Logs"])
 
-        with tab1:
-            col1, col2 = st.columns(2)
+# Mostrar datos y graficas (FUERA del if st.button)
+if os.path.exists(MONITOR_LOG):
+    
+    logged_data = pd.read_csv(MONITOR_LOG, on_bad_lines='skip', engine='python')
+        
+    #Crear tabs para organizar mejor
+    tab1, tab2, tab3 = st.tabs(["Graficas", "Data Drift", "Logs"])
+
+    with tab1:
+        col1, col2 = st.columns(2)
             
-            with col1:
+        with col1:
                 
-                #Histograma de predicciones
-                fig_hist = px.histogram(
-                    logged_data,
-                    x='prediction',
-                    nbins=20,
-                    title="Distribucion de Predicciones",
-                    color_discrete_sequence=['#1f77b4']
+                # Distribución de predicciones 
+                pred_counts = (
+                    logged_data['prediction']
+                    .round()
+                    .astype(int)
+                    .value_counts()
+                    .reindex([0, 1], fill_value=0)
+                    .reset_index()
                 )
-                st.plotly_chart(fig_hist, width="stretch")
+                pred_counts.columns = ["Predicción", "Cantidad"]
+                pred_counts["Predicción"] = pred_counts["Predicción"].astype(str)
 
-            with col2:
+                fig_hist = px.bar(
+                    pred_counts,
+                    x="Predicción",
+                    y="Cantidad",
+                    title="Distribución de Predicciones",
+                    color="Predicción",
+                    category_orders={"Predicción": ["0", "1"]},
+                    color_discrete_map={"0": "#E74C3C", "1": "#2ECC71"}
+                )
+                fig_hist.update_layout(
+                    template="plotly_white",
+                    title_x=0.5,
+                    xaxis_title="Predicción",
+                    yaxis_title="Cantidad",
+                    xaxis=dict(type="category"),
+                    showlegend=False
+                )
+                st.plotly_chart(fig_hist, width='content')
+
+        with col2:
                 
                 #Grafico de linea temporal (si hay timestamp)
                 if 'timestamp' in logged_data.columns:
                     logged_data['timestamp'] = pd.to_datetime(logged_data['timestamp'])
                     # Agrupar por minuto para mejor visualizacion
                     temporal_data = logged_data.groupby(
-                        logged_data['timestamp'].dt.floor('T')
+                        logged_data['timestamp'].dt.floor('min')
                     )['prediction'].mean().reset_index()
 
                     fig_time = px.line(
@@ -177,53 +381,113 @@ if st.button("Generar nuevas predicciones y actualizar log"):
                     st.plotly_chart(fig_box, width="stretch")
             
             #Grafico de comparacion con datos de referencia
-            st.subheader("Comparacion con Datos de Referencia")        
+        st.subheader("Comparacion con Datos de Referencia")        
             
             # Seleccionamos algunas columnas numericas para comparar
-            current_data = logged_data.drop(columns=["prediction", "timestamp"], errors="ignore")
-            numeric_cols = current_data.select_dtypes(include=['float64', 'int64']).columns
-            numeric_cols = [col for col in numeric_cols if col != 'prediction'][:4] #solo las primeras 4
+        current_data = logged_data.drop(columns=["prediction", "timestamp"], errors="ignore")
+        numeric_cols = current_data.select_dtypes(include=['float64', 'int64']).columns
+        numeric_cols = [col for col in numeric_cols if col != 'prediction'][:8] #primeras 8 variables
             
-            if len(numeric_cols) > 0: 
-                comparison_data = []
+        if len(numeric_cols) > 0: 
+                # Crear gráficos en columnas de 2
+                cols = st.columns(2)
+                col_idx = 0
+                
                 for col in numeric_cols:
                     if col in X_ref.columns:
-                        comparison_data.append({
-                            'Feature':col,
-                            'Referencia': X_ref[col].mean(),
-                            'Actual': current_data[col].mean(),
-                            'Dataset': 'Comparacion'
+                        ref_mean = X_ref[col].mean()
+                        actual_mean = current_data[col].mean()
+                        
+                        # Crear DataFrame para el gráfico
+                        comp_data = pd.DataFrame({
+                            'Dataset': ['Referencia', 'Actual'],
+                            'Media': [ref_mean, actual_mean]
                         })
-            
-                if comparison_data:
-                    comp_df = pd.DataFrame(comparison_data)
-                    
-                    fig_comp = go.Figure()
-                    fig_comp.add_trace(go.Bar(
-                        name='Referencia',
-                        x=comp_df['Feature'],
-                        y=comp_df['Referencia'],
-                        marker_color='lightblue'
-                    ))
-                    
-                    fig_comp.add_trace(go.Bar(
-                        name='Actual',
-                        x=comp_df['Feature'],
-                        y=comp_df['Actual'],
-                        marker_color='orange'
-                    ))
-                    
-                    fig_comp.update_layout(
-                        title='Comparacion de Medias: Referencia vs Actual',
-                        barmode='group'
-                    )
-                    
-                    st.plotly_chart(fig_comp, width="stretch")
+                        
+                        # Crear gráfico de barras individual
+                        fig = px.bar(
+                            comp_data,
+                            x='Dataset',
+                            y='Media',
+                            title=f'Variable: {col}',
+                            color='Dataset',
+                            color_discrete_map={'Referencia': 'lightblue', 'Actual': 'orange'}
+                        )
+                        
+                        with cols[col_idx % 2]:
+                            st.plotly_chart(fig, width='stretch')
+                        
+                        col_idx += 1
             
         with tab2:
-            st.subheader("Reporte de Data Drift")
+            st.subheader("Reporte de Data Drift (PSI)")
+            
+            # Calcular PSI para todas las variables (excluyendo las temporales)
+            try:
+                current_data_for_drift = logged_data.drop(
+                    columns=["prediction", "timestamp"], 
+                    errors="ignore"
+                )
+                
+                # Columnas a excluir (variables temporales que cambian naturalmente)
+                exclude_temporal = ["mes_prestamo", "anio_prestamo", "dia_semana_prestamo", "fin_de_mes"]
+                
+                drift_metrics = calculate_drift_metrics(X_ref, current_data_for_drift, exclude_cols=exclude_temporal)
+                
+                # ========================
+                # ALERTAS Y RECOMENDACIONES
+                # ========================
+                st.subheader("🚨 Alertas y Recomendaciones")
+                recommendations = generate_recommendations(drift_metrics)
+                
+                for rec in recommendations:
+                    if rec["nivel"].startswith("🔴"):
+                        st.error(f"**{rec['nivel']}** {rec['mensaje']}\n\n✅ **Acción:** {rec['accion']}")
+                    elif rec["nivel"].startswith("🟡"):
+                        st.warning(f"**{rec['nivel']}** {rec['mensaje']}\n\n✅ **Acción:** {rec['accion']}")
+                    else:
+                        st.success(f"**{rec['nivel']}** {rec['mensaje']}\n\n✅ **Acción:** {rec['accion']}")
+                
+                st.divider()
+                
+                # Mostrar tabla con métricas
+                st.dataframe(drift_metrics, width='stretch')
+                
+                # Resumen de drift
+                high_drift = len(drift_metrics[drift_metrics["PSI"] > 0.25])
+                moderate_drift = len(drift_metrics[(drift_metrics["PSI"] > 0.1) & (drift_metrics["PSI"] <= 0.25)])
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Variables con Drift Alto", high_drift)
+                with col2:
+                    st.metric("Variables con Drift Moderado", moderate_drift)
+                with col3:
+                    st.metric("Variables Estables", len(drift_metrics) - high_drift - moderate_drift)
+                
+                # Gráfico de PSI por variable
+                fig_psi = px.bar(
+                    drift_metrics.sort_values("PSI", ascending=False),
+                    x="Variable",
+                    y="PSI",
+                    color="PSI",
+                    color_continuous_scale=["green", "yellow", "red"],
+                    title="Índice de Estabilidad Poblacional (PSI) por Variable",
+                    hover_data={"Estado": True}
+                )
+                fig_psi.add_hline(y=0.1, line_dash="dash", line_color="orange", 
+                                 annotation_text="Umbral Moderado")
+                fig_psi.add_hline(y=0.25, line_dash="dash", line_color="red", 
+                                 annotation_text="Umbral Alto")
+                st.plotly_chart(fig_psi, width='stretch')
+                
+            except Exception as e:
+                st.error(f"Error calculando drift: {e}")
+            
+            st.divider()
+            st.subheader("Reporte de Data Drift (Evidently)")
             drift_report = generate_drift_report(
-                X_ref, logged_data.drop(columns=["prediction", "timestamp"], errors="ignore")
+                X_ref, current_data_for_drift
             )
             
             # Mostrar reporte
@@ -231,31 +495,78 @@ if st.button("Generar nuevas predicciones y actualizar log"):
                 st.components.v1.html(drift_report._repr_html_(), height=1000)
             except:
                 st.write("Reporte de Data Drift generado exitosamente")            
-                st.write(f"Datos de referencia: {X_ref.shape}, Datos actuales: {X_new.shape}")            
+                st.write(f"Datos de referencia: {X_ref.shape}, Datos actuales: {X_ref.shape}")
 
-                try:
-                    drift_data = drift_report.as_dict()
-                    if 'metrics' in drift_data and len (drift_data['metrics']):
-                        dataset_drift = drift_data['metrics'][0]. get('result')
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.metric("Dataset Drift Detectado", "Si" if dataset_drift else "No")
-                        with col2:
-                            # Contar cuantas features tienen drift
-                            feature_drifts = drift_data['metrics'][0].get('result',{}).get('drift_by_columns', {}) 
-                            drift_count = sum(1 for v in feature_drifts.values() if v) if feature_drifts else 0
-                            st.metric("Features con Drift", f"{drift_count/len(feature_drifts)}" if feature_drifts else "0/0")
+            # Análisis temporal dentro de Data Drift (al final)
+            st.divider()
+            st.subheader("Evolución Temporal del Data Drift")
+            
+            try:
+                exclude_temporal = ["mes_prestamo", "anio_prestamo", "dia_semana_prestamo", "fin_de_mes"]
+                window_size = st.sidebar.slider("Tamaño de ventana para análisis:", 20, 200, 50)
                 
-                except:
-                    pass
+                temporal_drift = calculate_temporal_drift(
+                    logged_data, 
+                    X_ref, 
+                    window_size=window_size,
+                    exclude_cols=exclude_temporal
+                )
+                
+                if len(temporal_drift) > 0:
+                    # Gráfico de línea temporal de PSI máximo
+                    fig_temporal = px.line(
+                        temporal_drift,
+                        x="Ventana",
+                        y="PSI_max",
+                        title="Evolución del PSI Máximo por Ventana Temporal",
+                        markers=True,
+                        color_discrete_sequence=["#636EFA"]
+                    )
+                    
+                    # Agregar zonas de referencia
+                    fig_temporal.add_hline(y=0.1, line_dash="dash", line_color="orange", 
+                                          annotation_text="Umbral Moderado (0.1)")
+                    fig_temporal.add_hline(y=0.25, line_dash="dash", line_color="red", 
+                                          annotation_text="Umbral Alto (0.25)")
+                    
+                    st.plotly_chart(fig_temporal, width='stretch')
+                    
+                    # Tabla de evolución
+                    st.dataframe(temporal_drift, width='stretch')
+                    
+                    # Detección de tendencias
+                    st.subheader("Análisis de Tendencias")
+                    
+                    if len(temporal_drift) > 2:
+                        # Calcular pendiente (tendencia simple)
+                        psi_values = temporal_drift["PSI_max"].values
+                        ventanas = np.arange(len(psi_values))
+                        
+                        # Regresión lineal simple
+                        slope = np.polyfit(ventanas, psi_values, 1)[0]
+                        
+                        # Interpretación
+                        if slope > 0.01:
+                            st.warning(f"📈 **Tendencia CRECIENTE** - El drift está aumentando (pendiente: {slope:.4f})")
+                            st.write("Recomendación: Monitorea de cerca el comportamiento del modelo.")
+                        elif slope < -0.01:
+                            st.success(f"📉 **Tendencia DECRECIENTE** - El drift está disminuyendo (pendiente: {slope:.4f})")
+                            st.write("Recomendación: Excelente, los datos se están estabilizando.")
+                        else:
+                            st.info(f"➡️ **Tendencia ESTABLE** - El drift se mantiene constante (pendiente: {slope:.4f})")
+                            st.write("Recomendación: El modelo funciona de manera estable.")
+                    
+                else:
+                    st.warning("Aún no hay suficientes predicciones para análisis temporal.")
+                    
+            except Exception as e:
+                st.error(f"Error en análisis temporal: {e}")
         
         with tab3:
             st.subheader("Log de monitoreo")
             
             # Filtro para mostrar mas o menos filas
-            shows_rows = st.selectbox("Mostrar ultimas:", [10, 20, 50, 100])
+            show_rows = st.selectbox("Mostrar ultimas:", [10, 20, 50, 100])
             display_df = make_arrow_compatible(logged_data.tail(show_rows))
             st.dataframe(display_df, width="stretch")
 
@@ -267,6 +578,6 @@ if st.button("Generar nuevas predicciones y actualizar log"):
                 file_name=f"monitoring_log_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime = "text/csv"
             )
-
+        
 else:
     st.warning("No hay datos de monitoreo aún. Presiona el boton para iniciar.")

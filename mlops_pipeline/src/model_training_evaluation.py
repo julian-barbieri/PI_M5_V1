@@ -3,7 +3,7 @@ from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, make_scorer
 from ft_engineering import ft_engineering_procesado
-from sklearn.model_selection import cross_validate, cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_validate, cross_val_score, TimeSeriesSplit
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 import optuna
@@ -154,7 +154,7 @@ def tune_best_model_with_optuna(best_name, X_train, y_train, cv_folds, optimize_
 def train_and_select_model(X_train, y_train, X_test, y_test):
 
     models = build_models()
-    cv_folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_folds = TimeSeriesSplit(n_splits=5)
 
     # scorers estándar + scorers para clase 0
     scoring = {

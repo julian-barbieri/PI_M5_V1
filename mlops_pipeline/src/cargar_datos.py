@@ -28,6 +28,8 @@ def cargar_datos():
 
     # 4. Leemos los datos y los imprimimos
     df = pd.read_excel(ruta_excel)
+    if "fecha_prestamo" in df.columns:
+        df["fecha_prestamo"] = pd.to_datetime(df["fecha_prestamo"], errors="coerce")
     return df
 
 if __name__ == "__main__":
