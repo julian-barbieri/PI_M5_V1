@@ -162,6 +162,4 @@ def ft_engineering_procesado():
         index=X_test.index
     )
 
-    #Visualizamos balanceo de clases (target)
-    print(df['Pago_atiempo'].value_counts())
     return X_train_processed_fe, X_test_processed_fe, y_train, y_test
