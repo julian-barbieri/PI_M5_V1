@@ -1,6 +1,7 @@
 # 1) librerias
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import List
 from pathlib import Path
 import pandas as pd
 import joblib
@@ -69,6 +70,14 @@ def predict(data: InsuranceData):
     input_df = input_df.reindex(columns=feature_names, fill_value=0)
     prediction = model.predict(input_df)[0]
     return {"Predicted_default": int(prediction)}
+
+
+@app.post("/predict_batch")
+def predict_batch(data: List[InsuranceData]):
+    input_df = pd.DataFrame([item.dict() for item in data])
+    input_df = input_df.reindex(columns=feature_names, fill_value=0)
+    predictions = model.predict(input_df)
+    return {"Predicted_default": [int(p) for p in predictions]}
 
 # ejecutar con: uvicorn filename:app --reload
 

@@ -314,7 +314,7 @@ if os.path.exists(MONITOR_LOG):
     logged_data = pd.read_csv(MONITOR_LOG, on_bad_lines='skip', engine='python')
         
     #Crear tabs para organizar mejor
-    tab1, tab2, tab3 = st.tabs(["Graficas", "Data Drift", "Logs"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Graficas", "Data Drift", "Logs", "Predicciones por Lotes"])
 
     with tab1:
         col1, col2 = st.columns(2)
@@ -578,6 +578,70 @@ if os.path.exists(MONITOR_LOG):
                 file_name=f"monitoring_log_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime = "text/csv"
             )
+        
+        with tab4:
+            st.subheader("Predicciones por Lotes")
+            st.write("Carga un archivo CSV con múltiples registros para obtener predicciones en lote.")
+            
+            # Upload file
+            uploaded_file = st.file_uploader("Elige un archivo CSV", type="csv")
+            
+            if uploaded_file is not None:
+                try:
+                    # Leer el archivo
+                    df_batch = pd.read_csv(uploaded_file)
+                    st.write(f"Registros cargados: {len(df_batch)}")
+                    st.dataframe(df_batch.head(), width='stretch')
+                    
+                    if st.button("Hacer predicciones"):
+                        with st.spinner("Procesando predicciones..."):
+                            try:
+                                # Convertir cada fila a diccionario y hacer request
+                                records = df_batch.to_dict('records')
+                                
+                                # Request a la API de batch
+                                response = requests.post(
+                                    "http://localhost:8000/predict_batch",
+                                    json=records,
+                                    timeout=30
+                                )
+                                
+                                if response.status_code == 200:
+                                    predictions = response.json()["Predicted_default"]
+                                    
+                                    # Agregar predicciones al dataframe
+                                    df_batch['Pago_atiempo'] = predictions
+                                    df_batch['Pago_atiempo'] = df_batch['Pago_atiempo'].astype(str).map({'0': '❌ No', '1': '✅ Sí'})
+                                    
+                                    st.success("✅ Predicciones completadas")
+                                    st.dataframe(df_batch, width='stretch')
+                                    
+                                    # Botón de descarga
+                                    csv_results = df_batch.to_csv(index=False)
+                                    st.download_button(
+                                        label="📥 Descargar resultados",
+                                        data=csv_results,
+                                        file_name=f"predicciones_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        mime="text/csv"
+                                    )
+                                    
+                                    # Estadísticas
+                                    st.subheader("Resumen de Predicciones")
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.metric("Total procesado", len(df_batch))
+                                    with col2:
+                                        default_count = predictions.count(0)
+                                        st.metric("Predicciones de Riesgo", default_count)
+                                else:
+                                    st.error(f"Error en la API: {response.status_code}")
+                                    st.write(response.text)
+                            except requests.exceptions.ConnectionError:
+                                st.error("❌ No se puede conectar con la API. ¿Está corriendo en el puerto 8000?")
+                            except Exception as e:
+                                st.error(f"❌ Error procesando predicciones: {str(e)}")
+                except Exception as e:
+                    st.error(f"Error cargando archivo: {str(e)}")
         
 else:
     st.warning("No hay datos de monitoreo aún. Presiona el boton para iniciar.")

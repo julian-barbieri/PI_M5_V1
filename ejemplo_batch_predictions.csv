@@ -1,0 +1,6 @@
+capital_prestado,plazo_meses,edad_cliente,salario_cliente,total_otros_prestamos,cuota_pactada,puntaje_datacredito,cant_creditosvigentes,huella_consulta,creditos_sectorFinanciero,creditos_sectorCooperativo,creditos_sectorReal,promedio_ingresos_datacredito,grupoEdad,es_independiente,anio_prestamo,mes_prestamo,dia_semana_prestamo,fin_de_mes,total_creditos,tipo_credito_4,tipo_credito_6,tipo_credito_7,tipo_credito_9,tipo_credito_10,tendencia_ingresos_Estable,tendencia_ingresos_Creciente,tendencia_ingresos_Decreciente,tendencia_ingresos_Sin_informacion
+50000,24,35,2500000,10000,2500,750,2,1,1,0,1,2600000,3,0,2024,5,3,0,3,1,0,0,0,0,1,0,0,0
+75000,36,45,3500000,20000,3000,800,3,0,2,1,0,3600000,4,1,2024,6,1,1,4,0,1,0,0,0,1,0,0,0
+30000,12,28,1800000,5000,2800,650,1,1,0,1,0,1900000,2,0,2024,4,2,0,2,0,0,1,0,0,0,1,0,0
+100000,48,55,5000000,50000,3500,850,4,0,1,2,1,5200000,5,1,2024,7,4,1,5,0,0,0,1,0,1,0,0,0
+45000,18,32,2200000,8000,2400,720,2,1,1,0,1,2300000,3,0,2024,5,5,0,2,1,0,0,0,0,0,1,0,0
