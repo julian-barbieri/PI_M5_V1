@@ -1,18 +1,25 @@
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, make_scorer, classification_report, confusion_matrix
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, make_scorer
 from ft_engineering import ft_engineering_procesado
-from sklearn.model_selection import cross_validate, cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_validate, cross_val_score, TimeSeriesSplit
 import warnings
 from sklearn.exceptions import ConvergenceWarning
 import optuna
-from sklearn.metrics import classification_report, confusion_matrix
 import time
 import numpy as np
+import joblib
+import os
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+def save_model(model, model_name, path="models"):
+    os.makedirs(path, exist_ok=True)
+    file_path = os.path.join(path, f"{model_name}.pkl")
+    joblib.dump(model, file_path)
+    print(f"✅ Modelo guardado en: {file_path}")
+
 
 def build_models():
     models = [
@@ -147,7 +154,7 @@ def tune_best_model_with_optuna(best_name, X_train, y_train, cv_folds, optimize_
 def train_and_select_model(X_train, y_train, X_test, y_test):
 
     models = build_models()
-    cv_folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_folds = TimeSeriesSplit(n_splits=5)
 
     # scorers estándar + scorers para clase 0
     scoring = {
@@ -227,6 +234,15 @@ def train_and_select_model(X_train, y_train, X_test, y_test):
         tuned_model = CatBoostClassifier(**best_params, loss_function="Logloss", random_seed=42, verbose=False, allow_writing_files=False)
 
     tuned_model.fit(X_train, y_train)
+
+    # Guardar orden exacto de columnas con el que se entrenó
+    feature_names = list(X_train.columns)
+
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(feature_names, "models/feature_names.pkl")
+    
+    #guardamos el modelo como archivo .pkl
+    save_model(model=tuned_model, model_name=f"{best['name']}_optuna")
 
     best["tuned_model"] = tuned_model
     best["optuna_best_params"] = best_params
