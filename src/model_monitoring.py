@@ -1,5 +1,4 @@
 import os
-import time
 import pandas as pd
 import numpy as np
 import requests
@@ -9,19 +8,13 @@ from ft_engineering import ft_engineering_procesado
 st.set_page_config(page_title="Monitoreo del modelo", layout="wide")
 
 import plotly.express as px 
-import plotly.graph_objects as go
-from evidently import Report 
-from evidently.presets import DataDriftPreset
-from cargar_datos import cargar_datos
-from scipy.stats import ks_2samp
 
 
 ##############
 # 1) Configuracion
 ##############
-API_URL= "http://localhost:8000/predict"
-DATASET_PATH = "./Base_de_datos.xlsx" #dataset transformado
-MONITOR_LOG = "./Base_de_datos.csv" #dataset para monitorear
+LEGACY_MONITOR_LOG = "./data-drift/Base_de_datos.csv" #archivo legado (ya no se utiliza)
+DATA_OUTPUT_DIR = "./predicciones" #salida de predicciones por lotes
 
 
 ##############
@@ -191,26 +184,6 @@ def calculate_drift_metrics(reference_df, current_df, exclude_cols=None):
 
 
 ##############
-# 3) API para predicciones
-##############
-
-def get_predictions(X_batch: pd.DataFrame, progress_bar=None):
-    records = X_batch.to_dict(orient="records")
-    preds = []
-    total = len(records)
-    for idx, record in enumerate(records, start=1):
-        try:
-            response = requests.post(API_URL, json=record)
-            response.raise_for_status()
-            preds.append(response.json()["Predicted_default"])
-            if progress_bar is not None and total > 0:
-                progress_bar.progress(idx / total)
-        except Exception as e:
-            st.error(f"Error conectando con la API: {e}")
-            return None
-    return preds
-        
-##############
 # 4) Guardar logs con timestamp
 ##############
 
@@ -218,23 +191,15 @@ def log_predictions(X_batch, preds):
     log_df = X_batch.copy()
     log_df['prediction'] = preds
     log_df['timestamp'] = pd.Timestamp.now()
-    
-    if os.path.exists(MONITOR_LOG):
-        log_df.to_csv(MONITOR_LOG, mode='a', header=False, index=False, quoting=1)  # quoting=csv.QUOTE_ALL
-    else:
-        log_df.to_csv(MONITOR_LOG, index=False, quoting=1)
+
+    os.makedirs(DATA_OUTPUT_DIR, exist_ok=True)
+    filename = f"predicciones_batch_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    output_path = os.path.join(DATA_OUTPUT_DIR, filename)
+    log_df.to_csv(output_path, index=False, quoting=1)
+    return output_path
 
 ##############
-# 5) Reporte Evidently
-##############
-
-def generate_drift_report(ref_data, new_data):
-    report = Report(metrics=[DataDriftPreset()])
-    report.run(reference_data = ref_data, current_data = new_data)
-    return report
-
-##############
-# 6) Alertas y Recomendaciones
+# 5) Alertas y Recomendaciones
 ##############
 
 def generate_recommendations(drift_metrics):
@@ -276,15 +241,24 @@ def generate_recommendations(drift_metrics):
 
 st.title("Monitoreo del modelo en Producción")
 
-# Metricas principales en la aparte superior
-if os.path.exists(MONITOR_LOG):
+# Eliminar archivo legado de log si existe (ya no se usa en el flujo actual)
+if os.path.exists(LEGACY_MONITOR_LOG):
     try:
-        logged_data = pd.read_csv(MONITOR_LOG, on_bad_lines='skip', engine='python')
-    except Exception as e:
-        st.error(f"Error al leer logs: {e}")
-        st.warning("Intenta borrar el archivo Base_de_datos.csv y reinicia.")
-        logged_data = pd.DataFrame()
-    
+        os.remove(LEGACY_MONITOR_LOG)
+    except Exception:
+        pass
+
+# Datos para visualización general (logs) y datos para drift (fijos)
+logged_data = X_new.copy()
+logged_data['prediction'] = y_new.values
+logged_data['timestamp'] = pd.date_range(end=pd.Timestamp.now(), periods=len(logged_data), freq='5min')
+data_source = "Dataset de validación (20%)"
+
+drift_data = X_new.copy()
+drift_data['timestamp'] = pd.date_range(end=pd.Timestamp.now(), periods=len(drift_data), freq='5min')
+
+# Metricas principales en la parte superior
+if logged_data is not None and len(logged_data) > 0:
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -293,26 +267,14 @@ if os.path.exists(MONITOR_LOG):
         st.metric("Predicción promedio", f"{logged_data['prediction'].mean():.3f}")
     with col3:
         st.metric("Desviacion Estándar", f"{logged_data['prediction'].std():.3f}")
+    
+    st.caption(f"Fuente de datos: **{data_source}**")
 
 st.sidebar.header("Opciones")
-sample_size = st.sidebar.slider("Tamaño de muestra para monitoreo:", 50, 500, 200)
-if st.button("Generar nuevas predicciones y actualizar log"):
-    sample = X_new.sample(n=sample_size, random_state=int(time.time()))
-    with st.spinner("Generando predicciones..."):
-        progress_bar = st.progress(0)
-        preds = get_predictions(sample, progress_bar)
-        progress_bar.progress(1.0)
-    
-    if preds:
-        log_predictions(sample, preds)
-        st.success("Nuevas predicciones agregadas al log")
-        st.rerun()
 
-# Mostrar datos y graficas (FUERA del if st.button)
-if os.path.exists(MONITOR_LOG):
+# Mostrar datos y graficas
+if logged_data is not None and len(logged_data) > 0:
     
-    logged_data = pd.read_csv(MONITOR_LOG, on_bad_lines='skip', engine='python')
-        
     #Crear tabs para organizar mejor
     tab1, tab2, tab3, tab4 = st.tabs(["Graficas", "Data Drift", "Logs", "Predicciones por Lotes"])
 
@@ -359,7 +321,7 @@ if os.path.exists(MONITOR_LOG):
                     logged_data['timestamp'] = pd.to_datetime(logged_data['timestamp'])
                     # Agrupar por minuto para mejor visualizacion
                     temporal_data = logged_data.groupby(
-                        logged_data['timestamp'].dt.floor('min')
+                        logged_data['timestamp'].dt.floor('d')
                     )['prediction'].mean().reset_index()
 
                     fig_time = px.line(
@@ -421,13 +383,11 @@ if os.path.exists(MONITOR_LOG):
             
         with tab2:
             st.subheader("Reporte de Data Drift (PSI)")
+            st.caption("El cálculo de drift usa únicamente dataset de referencia (80%) vs dataset actual base (20%). Los archivos generados en /data no se usan para drift.")
             
             # Calcular PSI para todas las variables (excluyendo las temporales)
             try:
-                current_data_for_drift = logged_data.drop(
-                    columns=["prediction", "timestamp"], 
-                    errors="ignore"
-                )
+                current_data_for_drift = drift_data.drop(columns=["timestamp"], errors="ignore")
                 
                 # Columnas a excluir (variables temporales que cambian naturalmente)
                 exclude_temporal = ["mes_prestamo", "anio_prestamo", "dia_semana_prestamo", "fin_de_mes"]
@@ -484,19 +444,6 @@ if os.path.exists(MONITOR_LOG):
             except Exception as e:
                 st.error(f"Error calculando drift: {e}")
             
-            st.divider()
-            st.subheader("Reporte de Data Drift (Evidently)")
-            drift_report = generate_drift_report(
-                X_ref, current_data_for_drift
-            )
-            
-            # Mostrar reporte
-            try:
-                st.components.v1.html(drift_report._repr_html_(), height=1000)
-            except:
-                st.write("Reporte de Data Drift generado exitosamente")            
-                st.write(f"Datos de referencia: {X_ref.shape}, Datos actuales: {X_ref.shape}")
-
             # Análisis temporal dentro de Data Drift (al final)
             st.divider()
             st.subheader("Evolución Temporal del Data Drift")
@@ -506,7 +453,7 @@ if os.path.exists(MONITOR_LOG):
                 window_size = st.sidebar.slider("Tamaño de ventana para análisis:", 20, 200, 50)
                 
                 temporal_drift = calculate_temporal_drift(
-                    logged_data, 
+                    drift_data, 
                     X_ref, 
                     window_size=window_size,
                     exclude_cols=exclude_temporal
@@ -566,8 +513,13 @@ if os.path.exists(MONITOR_LOG):
             st.subheader("Log de monitoreo")
             
             # Filtro para mostrar mas o menos filas
-            show_rows = st.selectbox("Mostrar ultimas:", [10, 20, 50, 100])
-            display_df = make_arrow_compatible(logged_data.tail(show_rows))
+            show_rows_option = st.selectbox("Mostrar ultimas:", [10, 20, 50, 100, "Todos"])
+            
+            if show_rows_option == "Todos":
+                display_df = make_arrow_compatible(logged_data)
+            else:
+                display_df = make_arrow_compatible(logged_data.tail(show_rows_option))
+            
             st.dataframe(display_df, width="stretch")
 
             # boton de descarga
@@ -609,11 +561,15 @@ if os.path.exists(MONITOR_LOG):
                                 if response.status_code == 200:
                                     predictions = response.json()["Predicted_default"]
                                     
-                                    # Agregar predicciones al dataframe
+                                    # Guardar archivo del lote en carpeta data
+                                    output_path = log_predictions(df_batch, predictions)
+                                    
+                                    # Agregar predicciones al dataframe para mostrar
                                     df_batch['Pago_atiempo'] = predictions
                                     df_batch['Pago_atiempo'] = df_batch['Pago_atiempo'].astype(str).map({'0': '❌ No', '1': '✅ Sí'})
                                     
-                                    st.success("✅ Predicciones completadas")
+                                    st.success("✅ Predicciones completadas y archivo guardado en carpeta data")
+                                    st.info(f"Archivo generado: {output_path}")
                                     st.dataframe(df_batch, width='stretch')
                                     
                                     # Botón de descarga
@@ -642,6 +598,6 @@ if os.path.exists(MONITOR_LOG):
                                 st.error(f"❌ Error procesando predicciones: {str(e)}")
                 except Exception as e:
                     st.error(f"Error cargando archivo: {str(e)}")
-        
 else:
-    st.warning("No hay datos de monitoreo aún. Presiona el boton para iniciar.")
+    st.info("Los datos mostrados provienen del dataset de validación (20%). Para monitoreo en tiempo real, realiza predicciones usando la pestaña 'Predicciones por Lotes'.")
+
